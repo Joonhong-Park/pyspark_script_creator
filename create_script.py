@@ -7,6 +7,7 @@ ETL Script Generator v2.1
 import sys
 import logging
 import psycopg2
+from psycopg2.extras import RealDictCursor
 from dataclasses import dataclass
 from typing import Callable
 
@@ -35,30 +36,28 @@ DOMAIN_MAP = {
 # [1] DB 조회
 # =============================================================================
 
-def execute_query(sql: str, params: tuple = None) -> list[dict]:
+def execute_query(sql):
     try:
         with psycopg2.connect(**DB_CONFIG) as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, params)
-                cols = [d[0] for d in cur.description]
-                return [dict(zip(cols, row)) for row in cur.fetchall()]
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql)
+                return [dict(row) for row in cur.fetchall()]
     except psycopg2.Error as e:
         log.error(f"DB Error: {e}")
         sys.exit(1)
 
 
-def get_metadata(table_name: str) -> dict:
+def get_metadata(table_name):
     rows = execute_query(
-        """
+        f"""
         SELECT table_id, db_name, table_name, sub_name,
                data_domain, data_path, data_subpath, data_filename,
                data_delimiter, header_yn, save_domain, save_path,
                partition_name, part_cnt, date_column, add_column, date_replace
           FROM meta_tables
-         WHERE table_name = %s
+         WHERE table_name = '{table_name}'
          ORDER BY table_id
-        """,
-        (table_name,)
+        """
     )
 
     if not rows:
@@ -119,10 +118,9 @@ def get_metadata(table_name: str) -> dict:
     return row
 
 
-def get_columns(table_id: str) -> list[dict]:
+def get_columns(table_id):
     cols = execute_query(
-        "SELECT col_name, col_type FROM meta_columns WHERE table_id = %s ORDER BY sort_idx",
-        (table_id,)
+        f"SELECT col_name, col_type FROM meta_columns WHERE table_id = '{table_id}' ORDER BY sort_idx"
     )
     if not cols:
         log.error(f"table_id={table_id} 에 해당하는 컬럼이 없습니다.")
@@ -136,23 +134,9 @@ def get_columns(table_id: str) -> list[dict]:
 # [2] 공통 섹션 빌더
 # =============================================================================
 
-def section_import(meta: dict) -> str:
-    header_val = "true" if (meta.get("header_yn") or "").lower() == "y" else "false"
+def section_import(meta):
     lines = [
         "from pyspark.sql.functions import col, lit, when, regexp_replace, to_timestamp, to_date, regexp_extract, input_file_name",
-        "",
-        f"source_path = '{meta['source_path']}'",
-        f"target_path = '{meta['target_path']}'",
-        f"header      = '{header_val}'",
-        f"delimiter   = '{meta['data_delimiter']}'",
-    ]
-    if meta.get("part1"):
-        lines.append(f"part1       = '{meta['part1']}'")
-    if meta.get("part2"):
-        lines.append(f"part2       = '{meta['part2']}'")
-    if meta.get("date_column"):
-        lines.append(f"date_col    = '{meta['date_column']}'")
-    lines += [
         "", "",
         "def null_replace(df):",
         "    exprs = [",
@@ -167,7 +151,24 @@ def section_import(meta: dict) -> str:
     return "\n".join(lines)
 
 
-def section_schema(cols: list) -> str:
+def section_vars(meta):
+    header_val = "true" if (meta.get("header_yn") or "").lower() == "y" else "false"
+    lines = [
+        f"source_path = '{meta['source_path']}'",
+        f"target_path = '{meta['target_path']}'",
+        f"header      = '{header_val}'",
+        f"delimiter   = '{meta['data_delimiter']}'",
+    ]
+    if meta.get("part1"):
+        lines.append(f"part1       = '{meta['part1']}'")
+    if meta.get("part2"):
+        lines.append(f"part2       = '{meta['part2']}'")
+    if meta.get("date_column"):
+        lines.append(f"date_col    = '{meta['date_column']}'")
+    return "\n".join(lines)
+
+
+def section_schema(cols):
     lines = []
     for i, c in enumerate(cols):
         comma = "," if i < len(cols) - 1 else ""
@@ -175,7 +176,7 @@ def section_schema(cols: list) -> str:
     return "schema = (\n" + "\n".join(lines) + "\n)"
 
 
-def section_read() -> str:
+def section_read():
     return (
         "df = (\n"
         "    spark.read\n"
@@ -190,7 +191,7 @@ def section_read() -> str:
     )
 
 
-def section_write(meta: dict) -> str:
+def section_write(meta):
     lines = ["(", "    df2.write", "    .mode('append')"]
     if meta.get("part2"):
         lines.append("    .partitionBy(part1, part2)")
@@ -201,7 +202,7 @@ def section_write(meta: dict) -> str:
     return "\n".join(lines)
 
 
-def _cast_exprs(cols: list) -> list[str]:
+def _cast_exprs(cols):
     """string 제외, 타입별 캐스팅 표현식 → .withColumn 문자열 리스트 반환"""
     result = []
     for c in cols:
@@ -214,12 +215,13 @@ def _cast_exprs(cols: list) -> list[str]:
     return result
 
 
-def assemble_script(meta: dict, schema_cols: list, extra_with_columns: list[str]) -> str:
+def assemble_script(meta, schema_cols, extra_with_columns):
     """공통 스크립트 조립. 타입별 차이는 schema_cols와 extra_with_columns만."""
     with_columns = _cast_exprs(schema_cols) + extra_with_columns
     sections = [
         section_import(meta),
         section_schema(schema_cols),
+        section_vars(meta),
         section_read(),
     ]
     if with_columns:
@@ -239,22 +241,24 @@ def assemble_script(meta: dict, schema_cols: list, extra_with_columns: list[str]
 # =============================================================================
 
 # ── AREA ──────────────────────────────────────────────────────────────────────
-def _cond_area(m: dict, c: list) -> bool:
+def _cond_area(m, c):
     return bool(m["add_column"]) and c[0]["col_name"] == "area"
 
-def _trans_area(m: dict, c: list) -> tuple[list, list[str]]:
+def _trans_area(m, c):
+    col_names = ", ".join(f"'{col['col_name']}'" for col in c[1:])
     extra = [
         f"    .withColumn('area', lit('{m['add_column']}'))",
         "    .withColumn(part1, col(date_col).cast('date'))",
+        f"    .select('area', {col_names}, part1)",
     ]
     return c[1:], extra
 
 
 # ── AREA_OLD ──────────────────────────────────────────────────────────────────
-def _cond_area_old(m: dict, c: list) -> bool:
+def _cond_area_old(m, c):
     return bool(m["add_column"]) and c[0]["col_name"] != "area"
 
-def _trans_area_old(m: dict, c: list) -> tuple[list, list[str]]:
+def _trans_area_old(m, c):
     extra = [
         f"    .withColumn('area', lit('{m['add_column']}'))",
         "    .withColumn(part1, col(date_col).cast('date'))",
@@ -263,10 +267,10 @@ def _trans_area_old(m: dict, c: list) -> tuple[list, list[str]]:
 
 
 # ── STRING_PART_Y ─────────────────────────────────────────────────────────────
-def _cond_string_part_y(m: dict, c: list) -> bool:
+def _cond_string_part_y(m, c):
     return m["date_replace"] == "y"
 
-def _trans_string_part_y(m: dict, c: list) -> tuple[list, list[str]]:
+def _trans_string_part_y(m, c):
     extra = [
         "    .withColumn(part1, to_timestamp(col(date_col), 'yyyyMMdd HHmmss').cast('date'))",
     ]
@@ -274,21 +278,21 @@ def _trans_string_part_y(m: dict, c: list) -> tuple[list, list[str]]:
 
 
 # ── STRING_PART_W ─────────────────────────────────────────────────────────────
-def _cond_string_part_w(m: dict, c: list) -> bool:
+def _cond_string_part_w(m, c):
     return m["date_replace"] == "w"
 
-def _trans_string_part_w(m: dict, c: list) -> tuple[list, list[str]]:
+def _trans_string_part_w(m, c):
     extra = [
-        "    .withColumn(part1, to_timestamp(col(date_col), 'yyyyMMdd').cast('date'))",
+        "    .withColumn(part1, to_date(col(date_col), 'yyyyMMdd'))",
     ]
     return c, extra
 
 
 # ── NOW_OLD ───────────────────────────────────────────────────────────────────
-def _cond_now_old(m: dict, c: list) -> bool:
+def _cond_now_old(m, c):
     return m["date_column"] == "now"
 
-def _trans_now_old(m: dict, c: list) -> tuple[list, list[str]]:
+def _trans_now_old(m, c):
     extra = [
         "    .withColumn('part1', to_date(regexp_extract(input_file_name(), r'_(\\d{8})_', 1), 'yyyyMMdd'))",
     ]
@@ -296,22 +300,24 @@ def _trans_now_old(m: dict, c: list) -> tuple[list, list[str]]:
 
 
 # ── NOW ───────────────────────────────────────────────────────────────────────
-def _cond_now(m: dict, c: list) -> bool:
+def _cond_now(m, c):
     return m["date_column"] == "data_insert_time"
 
-def _trans_now(m: dict, c: list) -> tuple[list, list[str]]:
+def _trans_now(m, c):
+    col_names = ", ".join(f"'{col['col_name']}'" for col in c[1:])
     extra = [
         "    .withColumn('data_insert_time', to_date(regexp_extract(input_file_name(), r'_(\\d{8})_', 1), 'yyyyMMdd'))",
         "    .withColumn(part1, col('data_insert_time').cast('date'))",
+        f"    .select('data_insert_time', {col_names}, part1)",
     ]
     return c[1:], extra
 
 
 # ── PARTITIONED ───────────────────────────────────────────────────────────────
-def _cond_partitioned(m: dict, c: list) -> bool:
+def _cond_partitioned(m, c):
     return bool(m["part1"])
 
-def _trans_partitioned(m: dict, c: list) -> tuple[list, list[str]]:
+def _trans_partitioned(m, c):
     extra = [
         "    .withColumn(part1, col(date_col).cast('date'))",
     ]
@@ -319,10 +325,10 @@ def _trans_partitioned(m: dict, c: list) -> tuple[list, list[str]]:
 
 
 # ── NO_PARTITIONED (fallback) ─────────────────────────────────────────────────
-def _cond_no_partitioned(m: dict, c: list) -> bool:
+def _cond_no_partitioned(m, c):
     return True
 
-def _trans_no_partitioned(m: dict, c: list) -> tuple[list, list[str]]:
+def _trans_no_partitioned(m, c):
     return c, []
 
 
@@ -332,13 +338,13 @@ def _trans_no_partitioned(m: dict, c: list) -> tuple[list, list[str]]:
 
 @dataclass
 class ScriptType:
-    name: str
+    name:        str
     description: str
-    condition: Callable[[dict, list], bool]
-    transformer: Callable[[dict, list], tuple[list, list[str]]]
+    condition:   Callable[[dict, list], bool]
+    transformer: Callable[[dict, list], tuple]
 
 
-SCRIPT_TYPES: list[ScriptType] = [
+SCRIPT_TYPES = [
     ScriptType(
         name="AREA",
         description="첫 컬럼(area) 제외 후 스키마 구성, add_column 값을 area 컬럼으로 추가, date_col → part1",
@@ -359,7 +365,7 @@ SCRIPT_TYPES: list[ScriptType] = [
     ),
     ScriptType(
         name="STRING_PART_W",
-        description="날짜 컬럼이 'yyyyMMdd' 문자열 형식, to_timestamp 파싱 → part1",
+        description="날짜 컬럼이 'yyyyMMdd' 문자열 형식, to_date 파싱 → part1",
         condition=_cond_string_part_w,
         transformer=_trans_string_part_w,
     ),
@@ -394,7 +400,7 @@ SCRIPT_TYPES: list[ScriptType] = [
 # [5] 타입 판별 및 스크립트 생성
 # =============================================================================
 
-def build_script(meta: dict, cols: list) -> tuple[str, str]:
+def build_script(meta, cols):
     """SCRIPT_TYPES 순서대로 조건을 검사해 첫 번째 일치 타입으로 스크립트 생성.
     반환값: (type_name, script_body)
     """
@@ -409,12 +415,14 @@ def build_script(meta: dict, cols: list) -> tuple[str, str]:
 # [6] 실행
 # =============================================================================
 
-def main() -> None:
+def main():
     if len(sys.argv) < 2:
-        log.error("Usage: python create_script.py <table_name>")
-        sys.exit(1)
-
-    table_name          = sys.argv[1]
+        table_name = input("table_name: ").strip()
+        if not table_name:
+            log.error("테이블명을 입력하세요.")
+            sys.exit(1)
+    else:
+        table_name = sys.argv[1]
     meta                = get_metadata(table_name)
     cols                = get_columns(meta["table_id"])
     script_type, script = build_script(meta, cols)
