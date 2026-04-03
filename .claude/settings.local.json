@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cat /storage/emulated/0/Download/create_pyspark_code/*.py)"
+    ]
+  }
+}
