@@ -136,7 +136,10 @@ def get_columns(table_id):
 
 def section_import(meta):
     lines = [
-        "from pyspark.sql.functions import col, lit, when, regexp_replace, to_timestamp, to_date, regexp_extract, input_file_name",
+        "from pyspark.sql import SparkSession",
+        "from pyspark.sql.functions import col, lit, when, regexp_replace, to_timestamp, to_date, regexp_extract, input_file_name, concat",
+        "",
+        f"spark = SparkSession.builder.appName('{meta['db_name']}.{meta['table_name']}').getOrCreate()",
         "", "",
         "def null_replace(df):",
         "    exprs = [",
@@ -172,7 +175,7 @@ def section_schema(cols):
     lines = []
     for i, c in enumerate(cols):
         comma = "," if i < len(cols) - 1 else ""
-        lines.append(f'    "{c["col_name"]} string{comma}"')
+        lines.append(f'"{c["col_name"]} string{comma}"')
     return "schema = (\n" + "\n".join(lines) + "\n)"
 
 
@@ -306,7 +309,7 @@ def _cond_now(m, c):
 def _trans_now(m, c):
     col_names = ", ".join(f"'{col['col_name']}'" for col in c[1:])
     extra = [
-        "    .withColumn('data_insert_time', to_date(regexp_extract(input_file_name(), r'_(\\d{8})_', 1), 'yyyyMMdd'))",
+        "    .withColumn('data_insert_time', to_timestamp(concat(regexp_extract(input_file_name(), r'_(\\d{8})_(\\d{4})\\.', 1), lit(' '), regexp_extract(input_file_name(), r'_(\\d{8})_(\\d{4})\\.', 2)), 'yyyyMMdd HHmm'))",
         "    .withColumn(part1, col('data_insert_time').cast('date'))",
         f"    .select('data_insert_time', {col_names}, part1)",
     ]
