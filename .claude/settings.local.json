@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cat /storage/emulated/0/Download/create_pyspark_code/*.py)"
+      "Bash(cat /storage/emulated/0/Download/create_pyspark_code/*.py)",
+      "Bash(git config:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)"
     ]
   }
 }

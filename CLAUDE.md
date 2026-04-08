@@ -25,7 +25,7 @@ python create_script.py
 
 1. **DB 조회** (`execute_query`, `get_metadata`, `get_columns`) — `meta_tables`, `meta_columns` 두 테이블에서 메타 정보 로드. 동일 `table_name`이 여러 행이면 대화형 선택 프롬프트 표시.
 
-2. **공통 섹션 빌더** (`section_import`, `section_schema`, `section_vars`, `section_read`, `section_write`, `assemble_script`) — 모든 타입에서 공유하는 PySpark 코드 블록 생성. 생성 순서: import → schema → vars → read → cast → write. `assemble_script(meta, schema_cols, extra_with_columns)`가 최종 조립을 담당.
+2. **공통 섹션 빌더** (`section_import`, `section_schema`, `section_vars`, `section_read`, `section_write`, `assemble_script`) — 모든 타입에서 공유하는 PySpark 코드 블록 생성. 생성 순서: import → schema → vars → read → cast → write. `assemble_script(meta, schema_cols, extra_with_columns)`가 최종 조립을 담당. 내부적으로 `_cast_exprs(schema_cols)`로 타입 캐스팅 체인을 먼저 생성한 뒤 `extra_with_columns`를 이어붙임.
 
 3. **타입 정의** (`SCRIPT_TYPES`) — `ScriptType` 데이터클래스 리스트. 각 항목이 판별 조건(`condition`)과 변환 로직(`transformer`)을 함께 보유. **새 타입 추가 시 이 리스트에만 항목을 추가하면 됨.**
 
@@ -78,9 +78,23 @@ df2 = (df2 .withColumn(...) ...)  # 타입별 캐스팅
 | `PARTITIONED` | `part1` 있음 | `date_col.cast('date')` → part1 |
 | `NO_PARTITIONED` | (fallback) | 타입 캐스팅만 수행 |
 
-## 파일명 규칙 (NOW 타입)
+## 캐스팅 규칙 (`_cast_exprs`)
 
-`table_name_xxxx_20260101_1330.csv.deflate` 형식에서 날짜+시분 추출:
+`schema_cols` 컬럼 목록을 순회하며 `.withColumn` 표현식 생성:
+
+- `string` 타입 → 생략 (캐스팅 없음)
+- `timestamp` 타입 → `time_replace(col(...)).cast('timestamp')` (`/` → `-` 치환 후 캐스팅)
+- 그 외 타입 → `col(...).cast('<type>')`
+
+## 파일명 규칙
+
+**NOW_OLD** — `table_name_xxxx_20260101_.csv` 형식에서 날짜(8자리)만 추출:
+
+```python
+to_date(regexp_extract(input_file_name(), r'_(\d{8})_', 1), 'yyyyMMdd')
+```
+
+**NOW** — `table_name_xxxx_20260101_1330.csv.deflate` 형식에서 날짜+시분 추출:
 
 ```python
 to_timestamp(concat(
@@ -100,8 +114,8 @@ ScriptType(
     description="설명",
     condition=lambda m, c: <판별 조건>,
     transformer=lambda m, c: (
-        <schema_cols>,       # cols 또는 cols[1:] 등
-        [<extra .withColumn 문자열들>],
+        <schema_cols>,       # cols 또는 cols[1:], cols[:-1] 등
+        [<extra 체인 항목들>],  # .withColumn(...) 또는 .select(...) 문자열 — _cast_exprs 결과 뒤에 붙음
     ),
 ),
 ```
