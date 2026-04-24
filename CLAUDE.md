@@ -21,17 +21,21 @@ python create_script.py
 
 ## Architecture
 
-단일 파일(`create_script.py`) 구조로, 6개 섹션이 순서대로 실행됨:
+단일 파일(`create_script.py`) 구조로, 7개 섹션(`[0]`~`[6]`)이 순서대로 실행됨:
+
+0. **설정** (`DB_CONFIG`, `DOMAIN_MAP`) — PostgreSQL 접속 정보 및 data_domain/save_domain → HDFS URL 매핑 상수.
 
 1. **DB 조회** (`execute_query`, `get_metadata`, `get_columns`) — `meta_tables`, `meta_columns` 두 테이블에서 메타 정보 로드. 동일 `table_name`이 여러 행이면 대화형 선택 프롬프트 표시.
 
 2. **공통 섹션 빌더** (`section_import`, `section_schema`, `section_vars`, `section_read`, `section_write`, `assemble_script`) — 모든 타입에서 공유하는 PySpark 코드 블록 생성. 생성 순서: import → schema → vars → read → cast → write. `assemble_script(meta, schema_cols, extra_with_columns)`가 최종 조립을 담당. 내부적으로 `_cast_exprs(schema_cols)`로 타입 캐스팅 체인을 먼저 생성한 뒤 `extra_with_columns`를 이어붙임.
 
-3. **타입 정의** (`SCRIPT_TYPES`) — `ScriptType` 데이터클래스 리스트. 각 항목이 판별 조건(`condition`)과 변환 로직(`transformer`)을 함께 보유. **새 타입 추가 시 이 리스트에만 항목을 추가하면 됨.**
+3. **타입별 조건·변환 함수** (`_cond_*`, `_trans_*`) — 각 스크립트 타입의 판별 조건(`condition`)과 변환 로직(`transformer`)을 별도 함수로 구현. `_trans_*` 함수는 `(schema_cols, extra_with_columns)` 튜플을 반환.
 
-4. **타입 판별 및 생성** (`build_script`) — `SCRIPT_TYPES`를 순서대로 검사해 첫 번째 일치 타입의 `transformer`를 실행 후 `assemble_script`로 조립. `(type_name, script_body)` 반환.
+4. **타입 정의** (`SCRIPT_TYPES`) — `ScriptType` 데이터클래스 리스트. 각 항목이 `[3]`에서 정의한 함수를 `condition`/`transformer`로 참조. **새 타입 추가 시 `[3]`에 함수를 추가하고 이 리스트에 항목을 추가하면 됨.**
 
-5. **출력** (`main`) — 생성된 스크립트를 메타 정보 요약과 함께 stdout 출력. 파일 저장 없음.
+5. **타입 판별 및 생성** (`build_script`) — `SCRIPT_TYPES`를 순서대로 검사해 첫 번째 일치 타입의 `transformer`를 실행 후 `assemble_script`로 조립. `(type_name, script_body)` 반환.
+
+6. **실행** (`main`) — 생성된 스크립트를 메타 정보 요약과 함께 stdout 출력. 파일 저장 없음.
 
 ## 생성 스크립트 구조
 
